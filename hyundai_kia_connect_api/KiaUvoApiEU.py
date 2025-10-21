@@ -7,12 +7,12 @@ import random
 import datetime as dt
 import logging
 import uuid
+import re
 from urllib.parse import parse_qs, urlparse
 
-import pytz
 import requests
 from bs4 import BeautifulSoup
-from dateutil import tz
+from zoneinfo import ZoneInfo
 
 
 from .ApiImplType1 import ApiImplType1
@@ -36,7 +36,6 @@ from .const import (
     DISTANCE_UNITS,
     DOMAIN,
     ENGINE_TYPES,
-    LOGIN_TOKEN_LIFETIME,
     SEAT_STATUS,
     TEMPERATURE_UNITS,
     VALET_MODE_ACTION,
@@ -76,7 +75,7 @@ SUPPORTED_LANGUAGES_LIST = [
 
 
 class KiaUvoApiEU(ApiImplType1):
-    data_timezone = tz.gettz("Europe/Berlin")
+    data_timezone = ZoneInfo("Europe/Berlin")
     temperature_range = [x * 0.5 for x in range(28, 60)]
 
     def __init__(self, region: int, brand: int, language: str) -> None:
@@ -94,6 +93,7 @@ class KiaUvoApiEU(ApiImplType1):
             self.BASE_DOMAIN: str = "prd.eu-ccapi.kia.com"
             self.PORT: int = 8080
             self.CCSP_SERVICE_ID: str = "fdc85c00-0a2f-4c64-bcb4-2cfb1500730a"
+            self.CCS_SERVICE_SECRET: str = "secret"
             self.APP_ID: str = "a2b8469b-30a3-4361-8e13-6fceea8fbe74"
             self.CFB: str = base64.b64decode(
                 "wLTVxwidmH8CfJYBWSnHD6E0huk0ozdiuygB4hLkM5XCgzAL1Dk5sE36d/bx5PFMbZs="
@@ -101,23 +101,27 @@ class KiaUvoApiEU(ApiImplType1):
             self.BASIC_AUTHORIZATION: str = (
                 "Basic ZmRjODVjMDAtMGEyZi00YzY0LWJjYjQtMmNmYjE1MDA3MzBhOnNlY3JldA=="
             )
-            self.LOGIN_FORM_HOST = "eu-account.kia.com"
+            self.LOGIN_FORM_HOST = "https://idpconnect-eu.kia.com"
             self.PUSH_TYPE = "APNS"
         elif BRANDS[self.brand] == BRAND_HYUNDAI:
             self.BASE_DOMAIN: str = "prd.eu-ccapi.hyundai.com"
             self.PORT: int = 8080
             self.CCSP_SERVICE_ID: str = "6d477c38-3ca4-4cf3-9557-2a1929a94654"
+            self.CCS_SERVICE_SECRET: str = (
+                "KUy49XxPzLpLuoK0xhBC77W6VXhmtQR9iQhmIFjjoY4IpxsV"
+            )
             self.APP_ID: str = "014d2225-8495-4735-812d-2616334fd15d"
             self.CFB: str = base64.b64decode(
                 "RFtoRq/vDXJmRndoZaZQyfOot7OrIqGVFj96iY2WL3yyH5Z/pUvlUhqmCxD2t+D65SQ="
             )
             self.BASIC_AUTHORIZATION: str = "Basic NmQ0NzdjMzgtM2NhNC00Y2YzLTk1NTctMmExOTI5YTk0NjU0OktVeTQ5WHhQekxwTHVvSzB4aEJDNzdXNlZYaG10UVI5aVFobUlGampvWTRJcHhzVg=="  # noqa
-            self.LOGIN_FORM_HOST = "eu-account.hyundai.com"
+            self.LOGIN_FORM_HOST = "https://idpconnect-eu.hyundai.com"
             self.PUSH_TYPE = "GCM"
         elif BRANDS[self.brand] == BRAND_GENESIS:
             self.BASE_DOMAIN: str = "prd-eu-ccapi.genesis.com"
             self.PORT: int = 443
             self.CCSP_SERVICE_ID: str = "3020afa2-30ff-412a-aa51-d28fbe901e10"
+            self.CCS_SERVICE_SECRET: str = "secret"
             self.APP_ID: str = "f11f2b86-e0e7-4851-90df-5600b01d8b70"
             self.CFB: str = base64.b64decode(
                 "RFtoRq/vDXJmRndoZaZQyYo3/qFLtVReW8P7utRPcc0ZxOzOELm9mexvviBk/qqIp4A="
@@ -135,23 +139,21 @@ class KiaUvoApiEU(ApiImplType1):
         self.GCM_SENDER_ID = 199360397125
 
         if BRANDS[self.brand] == BRAND_KIA:
-            auth_client_id = "572e0304-5f8d-4b4c-9dd5-41aa84eed160"
+            auth_client_id = "fdc85c00-0a2f-4c64-bcb4-2cfb1500730a"
             self.LOGIN_FORM_URL: str = (
-                "https://"
-                + self.LOGIN_FORM_HOST
-                + "/auth/realms/eukiaidm/protocol/openid-connect/auth?client_id="
+                self.LOGIN_FORM_HOST
+                + "/auth/api/v2/user/oauth2/authorize?response_type=code&client_id="
                 + auth_client_id
-                + "&scope=openid%20profile%20email%20phone&response_type=code&hkid_session_reset=true&redirect_uri="  # noqa
+                + "&redirect_uri="
                 + self.USER_API_URL
-                + "integration/redirect/login&ui_locales="
+                + "oauth2/redirect&lang="
                 + self.LANGUAGE
-                + "&state=$service_id:$user_id"
+                + "&state=ccsp"
             )
         elif BRANDS[self.brand] == BRAND_HYUNDAI:
             auth_client_id = "64621b96-0f0d-11ec-82a8-0242ac130003"
             self.LOGIN_FORM_URL: str = (
-                "https://"
-                + self.LOGIN_FORM_HOST
+                self.LOGIN_FORM_HOST
                 + "/auth/realms/euhyundaiidm/protocol/openid-connect/auth?client_id="
                 + auth_client_id
                 + "&scope=openid%20profile%20email%20phone&response_type=code&hkid_session_reset=true&redirect_uri="  # noqa
@@ -179,34 +181,59 @@ class KiaUvoApiEU(ApiImplType1):
         device_id = self._get_device_id(stamp)
         cookies = self._get_cookies()
         self._set_session_language(cookies)
-        authorization_code = None
-        try:
-            authorization_code = self._get_authorization_code_with_redirect_url(
-                username, password, cookies
+        if BRANDS[self.brand] == BRAND_KIA or BRANDS[self.brand] == BRAND_HYUNDAI:
+            refresh_token = password
+
+            _, access_token, authorization_code, expires_in = self._get_access_token(
+                stamp, refresh_token
             )
-        except Exception:
-            _LOGGER.debug(f"{DOMAIN} - get_authorization_code_with_redirect_url failed")
-            authorization_code = self._get_authorization_code_with_form(
-                username, password, cookies
+            valid_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                seconds=expires_in
             )
 
-        if authorization_code is None:
-            raise AuthenticationError("Login Failed")
+            return Token(
+                username=username,
+                password=password,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                device_id=device_id,
+                valid_until=valid_until,
+            )
 
-        _, access_token, authorization_code = self._get_access_token(
-            stamp, authorization_code
-        )
-        _, refresh_token = self._get_refresh_token(stamp, authorization_code)
-        valid_until = dt.datetime.now(pytz.utc) + LOGIN_TOKEN_LIFETIME
+        else:
+            authorization_code = None
+            try:
+                authorization_code = self._get_authorization_code_with_redirect_url(
+                    username, password, cookies
+                )
+            except Exception:
+                _LOGGER.debug(
+                    f"{DOMAIN} - get_authorization_code_with_redirect_url failed"
+                )
+                authorization_code = self._get_authorization_code_with_form(
+                    username, password, cookies
+                )
 
-        return Token(
-            username=username,
-            password=password,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            device_id=device_id,
-            valid_until=valid_until,
-        )
+            if authorization_code is None:
+                raise AuthenticationError("Login Failed")
+
+            _, access_token, authorization_code, expires_in = self._get_access_token(
+                stamp, authorization_code
+            )
+            valid_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                seconds=expires_in
+            )
+
+            _, refresh_token = self._get_refresh_token(stamp, authorization_code)
+
+            return Token(
+                username=username,
+                password=password,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                device_id=device_id,
+                valid_until=valid_until,
+            )
 
     def update_vehicle_with_cached_state(self, token: Token, vehicle: Vehicle) -> None:
         url = self.SPA_API_URL + "vehicles/" + vehicle.id
@@ -410,9 +437,15 @@ class KiaUvoApiEU(ApiImplType1):
         elif ev_charge_port_door_is_open == 2:
             vehicle.ev_charge_port_door_is_open = False
 
-        vehicle.ev_charging_power = get_child_value(
-            state, "vehicleStatus.evStatus.batteryPower.batteryStndChrgPower"
-        )
+        if (
+            get_child_value(
+                state, "vehicleStatus.evStatus.batteryPower.batteryStndChrgPower"
+            )
+            is not None
+        ):
+            vehicle.ev_charging_power = get_child_value(
+                state, "vehicleStatus.evStatus.batteryPower.batteryStndChrgPower"
+            )
 
         if (
             get_child_value(
@@ -1092,16 +1125,122 @@ class KiaUvoApiEU(ApiImplType1):
     def _get_authorization_code_with_redirect_url(
         self, username, password, cookies
     ) -> str:
-        url = self.USER_API_URL + "signin"
-        headers = {"Content-type": "application/json"}
-        data = {"email": username, "password": password}
-        response = requests.post(
-            url, json=data, headers=headers, cookies=cookies
-        ).json()
-        _LOGGER.debug(f"{DOMAIN} - Sign In Response: {response}")
-        parsed_url = urlparse(response["redirectUrl"])
-        authorization_code = "".join(parse_qs(parsed_url.query)["code"])
-        return authorization_code
+        if BRANDS[self.brand] == BRAND_HYUNDAI:
+            url = self.USER_API_URL + "signin"
+            headers = {"Content-type": "application/json"}
+            data = {"email": username, "password": password}
+            response = requests.post(
+                url, json=data, headers=headers, cookies=cookies
+            ).json()
+            _LOGGER.debug(f"{DOMAIN} - Sign In Response: {response}")
+            parsed_url = urlparse(response["redirectUrl"])
+            authorization_code = "".join(parse_qs(parsed_url.query)["code"])
+            return authorization_code
+        elif BRANDS[self.brand] == BRAND_KIA:
+            session = requests.session()
+            session.headers.update({"User-Agent": USER_AGENT_MOZILLA})
+            url = self.LOGIN_FORM_HOST + "/auth/account/signin"
+            headers = {"content-type": "application/x-www-form-urlencoded"}
+            data = {
+                "client_id": "peukiaidm-online-sales",
+                "encryptedPassword": "false",
+                "username": username,
+                "password": password,
+                "redirect_uri": "https://www.kia.com/api/bin/oneid/login",
+                "state": "aHR0cHM6Ly93d3cua2lhLmNvbTo0NDMvZGUvP3ZlZD0yYWhVS0V3akI2ZFc3dDQtUEF4WFBSZkVESGNDQ0J4UVFnVTk2QkFnY0VBZyZfdG09MTc1NTg1NTY2ODE2Mg==_default",
+                "remember_me": "false",
+            }
+            response = session.post(url, headers=headers, data=data, cookies=cookies)
+
+            device_id = self._get_device_id(self._get_stamp())
+
+            # Authorize
+            url = (
+                self.LOGIN_FORM_HOST
+                + "/auth/api/v2/user/oauth2/authorize?response_type=code&client_id="
+                + self.CCSP_SERVICE_ID
+                + "&redirect_uri=https://"
+                + self.BASE_URL
+                + "/api/v1/user/oauth2/redirect&state=ccsp&lang=en"
+            )
+            headers = {
+                "ccsp-application-id": self.APP_ID,
+                "ccsp-service-id": self.CCSP_SERVICE_ID,
+                "ccsp-device-id": device_id,
+            }
+            response = session.get(url, headers=headers, allow_redirects=False)
+            url_location = response.headers["location"]
+
+            # Authorize2: Get connector_session_key
+            response = session.get(url_location, headers=headers, allow_redirects=False)
+            url_location = response.headers["location"]
+            parsed_redirect = urlparse(url_location)
+            next_uri = parse_qs(parsed_redirect.query).get("next_uri")[0]
+            parsed_next_uri = urlparse(next_uri)
+            connector_session_key = parse_qs(parsed_next_uri.query).get(
+                "connector_session_key"
+            )[0]
+
+            # Authorize3
+            response = session.get(url_location, headers=headers, allow_redirects=False)
+
+            # Authorize: Get Code
+            url = (
+                self.LOGIN_FORM_HOST
+                + "/auth/api/v2/user/oauth2/authorize?client_id="
+                + self.CCSP_SERVICE_ID
+                + "&redirect_uri=https://"
+                + self.BASE_URL
+                + "/api/v1/user/oauth2/redirect&response_type=code&scope=&state=ccsp&connector_client_id=hmgid1.0-"
+                + self.CCSP_SERVICE_ID
+                + "&ui_locales=de&connector_scope=&connector_session_key="
+                + connector_session_key
+            )
+            response = session.get(url, headers=headers, allow_redirects=False)
+            url_location = response.headers["location"]
+            parsed_redirect = urlparse(url_location)
+            code = parse_qs(parsed_redirect.query).get("code")[0]
+
+            return code
+
+        else:
+            url = self.LOGIN_FORM_URL
+            headers = {"Content-type": "application/json"}
+            data = {"email": username, "password": password}
+            response = requests.get(url, headers=headers, cookies=cookies)
+            _LOGGER.debug(f"{DOMAIN} - Sign In Response: {response}")
+
+            url_redirect = response.url
+            connector_session_key = re.search(
+                r"connector_session_key%3D([0-9a-fA-F-]{36})", url_redirect
+            ).group(1)
+            url = self.LOGIN_FORM_HOST + "/auth/account/signin"
+            headers = {
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": self.LOGIN_FORM_HOST,
+            }
+            data = {
+                "client_id": self.CCSP_SERVICE_ID,
+                "encryptedPassword": "false",
+                "orgHmgSid": "",
+                "password": password,
+                "redirect_uri": "https://"
+                + self.BASE_DOMAIN
+                + ":8080/api/v1/user/oauth2/redirect",
+                "state": "ccsp",
+                "username": username,
+                "remember_me": "false",
+                "connector_session_key": connector_session_key,
+                "_csrf": "",
+            }
+
+            response = requests.post(
+                url, headers=headers, data=data, allow_redirects=False
+            )
+            location = response.headers["Location"]
+            code = parse_qs(urlparse(location).query).get("code")[0]
+
+            return code
 
     def _get_authorization_code_with_form(self, username, password, cookies) -> str:
         url = self.USER_API_URL + "integrationinfo"
@@ -1202,31 +1341,25 @@ class KiaUvoApiEU(ApiImplType1):
         return authorization_code
 
     def _get_access_token(self, stamp, authorization_code):
-        # Get Access Token #
-        url = self.USER_API_URL + "oauth2/token"
-        headers = {
-            "Authorization": self.BASIC_AUTHORIZATION,
-            "Stamp": stamp,
-            "Content-type": "application/x-www-form-urlencoded",
-            "Host": self.BASE_URL,
-            "Connection": "close",
-            "Accept-Encoding": "gzip, deflate",
-            "User-Agent": USER_AGENT_OK_HTTP,
+        url = self.LOGIN_FORM_HOST + "/auth/api/v2/user/oauth2/token"
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": authorization_code,
+            "client_id": self.CCSP_SERVICE_ID,
+            "client_secret": self.CCS_SERVICE_SECRET,
         }
 
-        data = (
-            "grant_type=authorization_code&redirect_uri=https%3A%2F%2F"
-            + self.BASE_DOMAIN
-            + "%3A8080%2Fapi%2Fv1%2Fuser%2Foauth2%2Fredirect&code="
-            + authorization_code
-        )
-        response = requests.post(url, data=data, headers=headers)
+        response = requests.post(url, data=data, allow_redirects=False)
+
         response = response.json()
+        _LOGGER.debug(f"{DOMAIN} - Get Access Token Response: {response}")
+        _check_response_for_errors(response)
 
         token_type = response["token_type"]
         access_token = token_type + " " + response["access_token"]
         authorization_code = response["refresh_token"]
-        return token_type, access_token, authorization_code
+        expires_in = response["expires_in"]
+        return token_type, access_token, authorization_code, expires_in
 
     def _get_refresh_token(self, stamp, authorization_code):
         # Get Refresh Token #

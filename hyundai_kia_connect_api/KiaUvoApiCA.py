@@ -6,11 +6,8 @@ import time
 import datetime as dt
 import json
 import logging
-import pytz
-import cloudscraper
-
-
-from dateutil.tz import tzoffset
+import requests
+from zoneinfo import ZoneInfo
 
 from .ApiImpl import ApiImpl, ClimateRequestOptions
 from .Token import Token
@@ -35,9 +32,90 @@ from .utils import (
     get_hex_temp_into_index,
     get_index_into_hex_temp,
     parse_datetime,
+    detect_timezone_for_date,
 )
 
+
+# Try to fix hyundai/cloudflare
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.ssl_ import create_urllib3_context
+import certifi
+
+# Firefox Fingerprint
+firefox = [
+    "TLS_AES_128_GCM_SHA256",
+    "TLS_CHACHA20_POLY1305_SHA256",
+    "TLS_AES_256_GCM_SHA384",
+    "ECDHE-ECDSA-AES128-GCM-SHA256",
+    "ECDHE-RSA-AES128-GCM-SHA256",
+    "ECDHE-ECDSA-CHACHA20-POLY1305",
+    "ECDHE-RSA-CHACHA20-POLY1305",
+    "ECDHE-ECDSA-AES256-GCM-SHA384",
+    "ECDHE-RSA-AES256-GCM-SHA384",
+    "ECDHE-ECDSA-AES256-SHA",
+    "ECDHE-ECDSA-AES128-SHA",
+    "ECDHE-RSA-AES128-SHA",
+    "ECDHE-RSA-AES256-SHA",
+    "DHE-RSA-AES128-SHA",
+    "DHE-RSA-AES256-SHA",
+    "AES128-SHA",
+    "AES256-SHA",
+    "DES-CBC3-SHA",
+]
+
 _LOGGER = logging.getLogger(__name__)
+
+
+CA_TIMEZONES = [
+    ZoneInfo(f"Canada/{zone}")
+    for zone in "Newfoundland Atlantic Eastern Central Mountain Pacific".split()
+]
+
+
+# Use the custom cipher order
+class CustomCipherAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context(ciphers=":".join(firefox))
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+
+class RetrySession(requests.Session):
+    def __init__(self, max_retries=3, delay=2, backoff=2):
+        super().__init__()
+        super().mount("https://", CustomCipherAdapter())
+        self.max_retries = max_retries
+        self.delay = delay
+        self.backoff = backoff
+
+    def post(self, url, **kwargs):
+        return self._request_with_retry("POST", url, **kwargs, verify=certifi.where())
+
+    def _request_with_retry(self, method, url, **kwargs):
+        attempt = 0
+        current_delay = self.delay
+
+        while attempt < self.max_retries:
+            try:
+                _LOGGER.debug(f"{DOMAIN} - Try to request {attempt + 1}")
+                response = super().request(method, url, **kwargs)
+
+                return response
+            except requests.exceptions.ConnectionError as e:
+                _LOGGER.debug(
+                    f"{DOMAIN} - Attempt {attempt + 1}: Connection error ({e}), retrying..."
+                )
+                last_exception = e
+                time.sleep(current_delay)
+                current_delay *= self.backoff
+                attempt += 1
+            except requests.exceptions.RequestException as e:
+                _LOGGER.debug(
+                    f"{DOMAIN} - {method} Other exception not connection reset {attempt + 1}: Connection error ({e})"
+                )
+                raise e
+
+        raise last_exception
 
 
 class KiaUvoApiCA(ApiImpl):
@@ -48,7 +126,6 @@ class KiaUvoApiCA(ApiImpl):
     temperature_range_model_year = 2020
 
     def __init__(self, region: int, brand: int, language: str) -> None:
-        self.vehicle_timezone = self.data_timezone
         self.LANGUAGE: str = language
         self.brand = brand
         if BRANDS[brand] == BRAND_KIA:
@@ -61,6 +138,7 @@ class KiaUvoApiCA(ApiImpl):
         self.old_vehicle_status = {}
         self.API_URL: str = "https://" + self.BASE_URL + "/tods/api/"
         self.API_HEADERS = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.1) Gecko/20100101 Firefox/141.1",
             "content-type": "application/json",
             "accept": "application/json",
             "accept-encoding": "gzip",
@@ -80,9 +158,7 @@ class KiaUvoApiCA(ApiImpl):
     @property
     def sessions(self):
         if not self._sessions:
-            self._sessions = cloudscraper.create_scraper(
-                browser={"custom": "okhttp/4.12.0"}
-            )
+            self._sessions = RetrySession(max_retries=4, delay=2, backoff=2)
         return self._sessions
 
     def _check_response_for_errors(self, response: dict) -> None:
@@ -114,6 +190,9 @@ class KiaUvoApiCA(ApiImpl):
         data = {"loginId": username, "password": password}
         headers = self.API_HEADERS
         headers.pop("accessToken", None)
+        headers["Deviceid"] = (
+            "TW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEzOC4wLjAuMCBTYWZhcmkvNTM3LjM2IEVkZy8xMzguMC4wLjArV2luMzIrMTIzNCsxMjM0"
+        )
         response = self.sessions.post(url, json=data, headers=headers)
         _LOGGER.debug(f"{DOMAIN} - Sign In Response {response.text}")
         response = response.json()
@@ -123,7 +202,9 @@ class KiaUvoApiCA(ApiImpl):
         access_token = response["accessToken"]
         refresh_token = response["refreshToken"]
 
-        valid_until = dt.datetime.now(pytz.utc) + dt.timedelta(seconds=token_expire_in)
+        valid_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+            seconds=token_expire_in
+        )
 
         return Token(
             username=username,
@@ -207,18 +288,21 @@ class KiaUvoApiCA(ApiImpl):
     def force_refresh_vehicle_state(self, token: Token, vehicle: Vehicle) -> None:
         state = self._get_forced_vehicle_state(token, vehicle)
 
-        # Calculate offset between vehicle last_updated_at and UTC
-        self.vehicle_timezone = vehicle.timezone
+        # lastStatusDate uses one of the Canadian timezones configured through
+        # the car entertainment system.
         last_updated_at = parse_datetime(
-            get_child_value(state, "status.lastStatusDate"), self.data_timezone
+            get_child_value(state, "status.lastStatusDate"), dt.timezone.utc
         )
-        now_utc: dt = dt.datetime.now(pytz.utc)
-        offset = round((last_updated_at - now_utc).total_seconds() / 3600)
-        _LOGGER.debug(f"{DOMAIN} - Offset between vehicle and UTC: {offset} hours")
-        if offset != 0:
-            # Set our timezone to account for the offset
-            vehicle.timezone = tzoffset("VEHICLETIME", offset * 3600)
-            _LOGGER.debug(f"{DOMAIN} - Set vehicle.timezone to UTC + {offset} hours")
+        ref_date = dt.datetime.now(tz=dt.timezone.utc)
+        tz = detect_timezone_for_date(last_updated_at, ref_date, CA_TIMEZONES)
+        if tz:
+            _LOGGER.debug(f"{DOMAIN} - Set vehicle.timezone to {tz} (guessed)")
+            vehicle.timezone = tz
+        else:
+            delta = (ref_date - last_updated_at).total_seconds() / 3600
+            _LOGGER.warning(
+                f"{DOMAIN} - could not guess Canadian timezone! delta is {delta} hours"
+            )
 
         self._update_vehicle_properties_base(vehicle, state)
 
@@ -245,7 +329,6 @@ class KiaUvoApiCA(ApiImpl):
 
     def _update_vehicle_properties_base(self, vehicle: Vehicle, state: dict) -> None:
         _LOGGER.debug(f"{DOMAIN} - Old Vehicle Last Updated: {vehicle.last_updated_at}")
-        self.vehicle_timezone = vehicle.timezone
         vehicle.last_updated_at = parse_datetime(
             get_child_value(state, "status.lastStatusDate"), self.data_timezone
         )
@@ -349,6 +432,7 @@ class KiaUvoApiCA(ApiImpl):
             state, "status.doorOpen.backRight"
         )
         vehicle.hood_is_open = get_child_value(state, "status.hoodOpen")
+        vehicle.sunroof_is_open = get_child_value(state, "status.sunroofOpen")
 
         vehicle.trunk_is_open = get_child_value(state, "status.trunkOpen")
         vehicle.front_left_window_is_open = get_child_value(
@@ -404,10 +488,23 @@ class KiaUvoApiCA(ApiImpl):
         vehicle.fuel_driving_range = (
             get_child_value(
                 state,
-                "status.dte.value",
+                "status.evStatus.drvDistance.0.rangeByFuel.gasModeRange.value",
             ),
-            DISTANCE_UNITS[get_child_value(state, "status.dte.unit")],
+            DISTANCE_UNITS[
+                get_child_value(
+                    state, "status.evStatus.drvDistance.0.rangeByFuel.gasModeRange.unit"
+                )
+            ],
         )
+        if vehicle.fuel_driving_range is None:
+            vehicle.fuel_driving_range = (
+                get_child_value(
+                    state,
+                    "status.dte.value",
+                ),
+                DISTANCE_UNITS[get_child_value(state, "status.dte.unit")],
+            )
+
         vehicle.fuel_level_is_low = get_child_value(state, "status.lowFuelLight")
         vehicle.fuel_level = get_child_value(state, "status.fuelLevel")
         vehicle.air_control_is_on = get_child_value(state, "status.airCtrlOn")
@@ -435,7 +532,6 @@ class KiaUvoApiCA(ApiImpl):
         self, vehicle: Vehicle, state: dict
     ) -> None:
         if get_child_value(state, "coord.lat"):
-            self.vehicle_timezone = vehicle.timezone
             vehicle.location = (
                 get_child_value(state, "coord.lat"),
                 get_child_value(state, "coord.lon"),

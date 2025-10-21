@@ -9,9 +9,8 @@ import random
 import uuid
 from urllib.parse import parse_qs, urlparse
 
-import pytz
 import requests
-from dateutil import tz
+from zoneinfo import ZoneInfo
 
 from .ApiImplType1 import ApiImplType1
 from .Token import Token
@@ -54,7 +53,7 @@ USER_AGENT_MOZILLA: str = "Mozilla/5.0 (Linux; Android 4.1.1; Galaxy Nexus Build
 
 
 class KiaUvoApiAU(ApiImplType1):
-    data_timezone = tz.gettz("Australia/Sydney")
+    data_timezone = ZoneInfo("Australia/Sydney")
     temperature_range = [x * 0.5 for x in range(34, 54)]
 
     def __init__(self, region: int, brand: int, language: str) -> None:
@@ -65,7 +64,7 @@ class KiaUvoApiAU(ApiImplType1):
             self.APP_ID: str = "4ad4dcde-be23-48a8-bc1c-91b94f5c06f8"  # Android app ID
             self.BASIC_AUTHORIZATION: str = "Basic OGFjYjc3OGEtYjkxOC00YThkLTg2MjQtNzNhMGJlYjY0Mjg5OjdTY01NbTZmRVlYZGlFUEN4YVBhUW1nZVlkbFVyZndvaDRBZlhHT3pZSVMyQ3U5VA=="  # noqa
             self.cfb = base64.b64decode(
-                "IDbMgWBXgic4MAyMgf5PFFRAdGX5O3IyC3uvN3scCs0gDpTFDuyvBorlAH9JMM2/wMc="
+                "SGGCDRvrzmRa2WTNFQPUaNfSFdtPklZ48xUuVckigYasxmeOQqVgCAC++YNrI1vVabI="
             )
         elif BRANDS[brand] == BRAND_HYUNDAI:
             self.BASE_URL: str = "au-apigw.ccs.hyundai.com.au:8080"
@@ -73,7 +72,7 @@ class KiaUvoApiAU(ApiImplType1):
             self.APP_ID: str = "f9ccfdac-a48d-4c57-bd32-9116963c24ed"  # Android app ID
             self.BASIC_AUTHORIZATION: str = "Basic ODU1YzcyZGYtZGZkNy00MjMwLWFiMDMtNjdjYmY5MDJiYjFjOmU2ZmJ3SE0zMllOYmhRbDBwdmlhUHAzcmY0dDNTNms5MWVjZUEzTUpMZGJkVGhDTw=="  # noqa
             self.cfb = base64.b64decode(
-                "V60WkEmyRQaAfrBF1623/7QL62MjLVbCHdItGzQ1g5T/hkmKmMVTaMHv4cKGzgD3gL8="
+                "nGDHng3k4Cg9gWV+C+A6Yk/ecDopUNTkGmDpr2qVKAQXx9bvY2/YLoHPfObliK32mZQ="
             )
         elif BRANDS[brand] == BRAND_KIA and REGIONS[region] == REGION_NZ:
             self.BASE_URL: str = "au-apigw.ccs.kia.com.au:8082"
@@ -81,7 +80,7 @@ class KiaUvoApiAU(ApiImplType1):
             self.APP_ID: str = "97745337-cac6-4a5b-afc3-e65ace81c994"  # Android app ID
             self.BASIC_AUTHORIZATION: str = "Basic NGFiNjA2YTctY2VhNC00OGEwLWEyMTYtZWQ5YzE0YTRhMzhjOjBoYUZxWFRrS2t0Tktmemt4aFowYWt1MzFpNzRnMHlRRm01b2QybXo0TGRJNW1MWQ=="  # noqa
             self.cfb = base64.b64decode(
-                "IDbMgWBXgic4MAyMgf5PFGsDas7YzQmN/lcPSkArm/KVUTutuiJAZ+4ZFoVxsHFNNy4="
+                "SGGCDRvrzmRa2WTNFQPUaC1OsnAhQgPgcQETEfbY8abEjR/ICXK0p+Rayw5tHCGyiUA="
             )
 
         self.USER_API_URL: str = "https://" + self.BASE_URL + "/api/v1/user/"
@@ -109,7 +108,7 @@ class KiaUvoApiAU(ApiImplType1):
             authorization_code, stamp
         )
         _, refresh_token = self._get_refresh_token(authorization_code, stamp)
-        valid_until = dt.datetime.now(pytz.utc) + dt.timedelta(hours=23)
+        valid_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=23)
 
         return Token(
             username=username,
@@ -577,7 +576,7 @@ class KiaUvoApiAU(ApiImplType1):
             ).json()
             _LOGGER.debug(f"{DOMAIN} - _get_location response: {response}")
             _check_response_for_errors(response)
-            return response["resMsg"]["gpsDetail"]
+            return response["resMsg"]
         except Exception:
             _LOGGER.debug(f"{DOMAIN} - _get_location failed")
             return None

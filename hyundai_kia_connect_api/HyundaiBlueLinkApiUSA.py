@@ -5,7 +5,6 @@
 import logging
 import time
 import datetime as dt
-import pytz
 import requests
 import certifi
 
@@ -66,7 +65,7 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
     """HyundaiBlueLinkApiUSA"""
 
     # initialize with a timestamp which will allow the first fetch to occur
-    last_loc_timestamp = dt.datetime.now(pytz.utc) - dt.timedelta(hours=3)
+    last_loc_timestamp = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=3)
 
     def __init__(self, region: int, brand: int, language: str):
         self.LANGUAGE: str = language
@@ -121,7 +120,7 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
     def _get_vehicle_headers(self, token: Token, vehicle: Vehicle) -> dict:
         headers = self._get_authenticated_headers(token)
         headers["registrationId"] = vehicle.id
-        headers["gen"] = vehicle.generation
+        headers["gen"] = str(vehicle.generation)
         headers["vin"] = vehicle.VIN
         return headers
 
@@ -137,7 +136,9 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
         refresh_token = response["refresh_token"]
         expires_in = float(response["expires_in"])
 
-        valid_until = dt.datetime.now(pytz.utc) + dt.timedelta(seconds=expires_in)
+        valid_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+            seconds=expires_in
+        )
 
         return Token(
             username=username,
@@ -381,7 +382,7 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
             state, "vehicleStatus.evStatus.batteryPlugin"
         )
         vehicle.ev_charging_power = get_child_value(
-            state, "vehicleStatus.evStatus.batteryPower.batteryStndChrgPower"
+            state, "vehicleStatus.evStatus.batteryStndChrgPower"
         )
         ChargeDict = get_child_value(
             state, "vehicleStatus.evStatus.reservChargeInfos.targetSOClist"
@@ -686,9 +687,8 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
                 ):
                     vehicle_location_result = self._get_vehicle_location(token, vehicle)
                 else:
-                    cached_location = state["vehicleStatus"]["vehicleLocation"]
                     _LOGGER.debug(
-                        f"{DOMAIN} - update_vehicle_with_cached_state keep Location fallback {cached_location}"  # noqa
+                        f"{DOMAIN} - update_vehicle_with_cached_state keep Location fallback"  # noqa
                     )
             else:
                 vehicle_location_result = self._get_vehicle_location(token, vehicle)
@@ -696,9 +696,8 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
             if vehicle_location_result is not None:
                 state["vehicleStatus"]["vehicleLocation"] = vehicle_location_result
             else:
-                cached_location = state["vehicleStatus"]["vehicleLocation"]
                 _LOGGER.debug(
-                    f"{DOMAIN} - update_vehicle_with_cached_state Location fallback {cached_location}"  # noqa
+                    f"{DOMAIN} - update_vehicle_with_cached_state Location fallback"  # noqa
                 )
 
         self._update_vehicle_properties(vehicle, state)
@@ -744,7 +743,7 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
                 registration_date=entry["enrollmentDate"],
                 timezone=self.data_timezone,
                 enabled=entry.get("enrollmentStatus") != "CANCELLED",
-                generation=entry.get("vehicleGeneration", 2),
+                generation=int(entry.get("vehicleGeneration", "2")),
             )
             result.append(vehicle)
 
@@ -811,17 +810,19 @@ class HyundaiBlueLinkApiUSA(ApiImpl):
         if vehicle.engine_type == ENGINE_TYPES.EV:
             data = {
                 "airCtrl": int(options.climate),
-                "igniOnDuration": options.duration,
                 "airTemp": {"value": str(options.set_temp), "unit": 1},
                 "defrost": options.defrost,
                 "heating1": int(options.heating),
-                "seatHeaterVentInfo": {
+            }
+            # Older vehicles do not support seat heater vent info or duration
+            if vehicle.generation == 3:
+                data["igniOnDuration"] = options.duration
+                data["seatHeaterVentInfo"] = {
                     "drvSeatHeatState": options.front_left_seat,
                     "astSeatHeatState": options.front_right_seat,
                     "rlSeatHeatState": options.rear_left_seat,
                     "rrSeatHeatState": options.rear_right_seat,
-                },
-            }
+                }
         else:
             data = {
                 "Ims": 0,

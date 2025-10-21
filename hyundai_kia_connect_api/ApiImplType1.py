@@ -34,6 +34,7 @@ from .const import (
 
 from .exceptions import (
     APIError,
+    AuthenticationError,
     DuplicateRequestError,
     RequestTimeoutError,
     ServiceTemporaryUnavailable,
@@ -70,6 +71,7 @@ def _check_response_for_errors(response: dict) -> None:
     """
 
     error_code_mapping = {
+        "7501": AuthenticationError,
         "4002": DeviceIDError,
         "4004": DuplicateRequestError,
         "4081": RequestTimeoutError,
@@ -79,16 +81,34 @@ def _check_response_for_errors(response: dict) -> None:
         "9999": RequestTimeoutError,
     }
 
-    if not any(x in response for x in ["retCode", "resCode", "resMsg"]):
+    error_message_to_exception_mapping = {
+        "Key not authorized: Token is expired": AuthenticationError
+    }
+
+    if not any(
+        x in response for x in ["retCode", "resCode", "resMsg", "error", "access_token"]
+    ):
         _LOGGER.error(f"Unknown API response format: {response}")
         raise InvalidAPIResponseError()
 
-    if response["retCode"] == "F":
+    if "retCode" in response and response["retCode"] == "F":
         if response["resCode"] in error_code_mapping:
             raise error_code_mapping[response["resCode"]](response["resMsg"])
         raise APIError(
             f"Server returned:  '{response['resCode']}' '{response['resMsg']}'"
         )
+    elif "error" in response:
+        error_reason = response["error"]
+        if error_reason in error_message_to_exception_mapping:
+            _LOGGER.error(f"API error: {error_reason}")
+            raise error_message_to_exception_mapping[error_reason](error_reason)
+        else:
+            _LOGGER.error(f"Unknown error in API response: {error_reason}")
+            raise APIError(f"Unknown error in API response: {error_reason}")
+    elif "retCode" in response and "retMsg" in response:
+        retMSG = response["retMsg"]
+        if retMSG == "Received unexpected statusCode":
+            raise AuthenticationError(retMSG)
 
 
 class ApiImplType1(ApiImpl):
@@ -317,6 +337,10 @@ class ApiImplType1(ApiImpl):
         vehicle.ev_battery_percentage = get_child_value(
             state, "Green.BatteryManagement.BatteryRemain.Ratio"
         )
+        if get_child_value(state, "Green.Electric.SmartGrid.RealTimePower") is not None:
+            vehicle.ev_charging_power = get_child_value(
+                state, "Green.Electric.SmartGrid.RealTimePower"
+            )
         vehicle.ev_battery_remain = get_child_value(
             state, "Green.BatteryManagement.BatteryRemain.Value"
         )
@@ -842,7 +866,7 @@ class ApiImplType1(ApiImpl):
             )
             payload = {
                 "command": "start",
-                "ignitionDuration:": options.duration,
+                "ignitionDuration": options.duration,
                 "strgWhlHeating": options.steering_wheel,
                 "hvacTempType": 1,
                 "hvacTemp": options.set_temp,
