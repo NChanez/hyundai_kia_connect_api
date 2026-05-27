@@ -8,3 +8,6 @@
 __pycache__/
 .env
 *.egg-info
+.idea/
+.vscode/
+daily_stats.csv
